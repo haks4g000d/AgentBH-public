@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# repo root = this script's parent dir
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+# ensure $HOME/go/bin is first (for nuclei/naabu/ffuf/katana you install)
+export PATH="$HOME/go/bin:$PATH"
+
+# defaults
+rate_nuclei=5
+rate_httpx=5
+rate_naabu=50
+ffuf_threads=10
+slug=""
+domain=""
+ffuf_url=""
+wordlist="/tmp/agentbh_marker.txt"
+ephemeral=0
+do_all=0; do_ports=0; do_nuclei=0; do_crawl=0; do_ffuf=0; do_summary=0
+
+usage() {
+  cat <<USAGE
+agentbh — wrapper for AgentBH (repo-relative)
+
+Usage:
+  agentbh [flags] -d <domain>            # auto-generate slug & run a task
+  agentbh [flags] -g <slug> -d <domain>  # use explicit slug
+
+Flags:
+  -a            Full pipeline (python -m agent.cli scan)
+  -p            Ports (naabu)
+  -n            Nuclei (http/xss)
+  -c            Crawl (katana)
+  -f            FFUF (requires -u URL with FUZZ)
+  -s            Summary
+  -g <slug>     Program slug (folder-safe name)
+  -d <domain>   Target root domain
+  -u <url>      FFUF URL (must include FUZZ)
+  -w <path>     FFUF wordlist (default creates marker)
+  -o <num>      Nuclei -rl (default 5)
+  -R <num>      HTTPX rate (reserved) default 5
+  -r <num>      Naabu packets/sec (default 50)
+  -t <num>      FFUF threads (default 10)
+  -e            Ephemeral: delete created YAML after run
+  -h            Help
+USAGE
+}
+
+auto_slug() {
+  local base="${domain%%.*}"
+  date +"${base}-%Y%m%d-%H%M%S"
+}
+
+while getopts ":apncfs g:d:u:w:o:R:r:t:eh" opt; do
+  case "$opt" in
+    a) do_all=1 ;;
+    p) do_ports=1 ;;
+    n) do_nuclei=1 ;;
+    c) do_crawl=1 ;;
+    f) do_ffuf=1 ;;
+    s) do_summary=1 ;;
+    g) slug="$OPTARG" ;;
+    d) domain="$OPTARG" ;;
+    u) ffuf_url="$OPTARG" ;;
+    w) wordlist="$OPTARG" ;;
+    o) rate_nuclei="$OPTARG" ;;
+    R) rate_httpx="$OPTARG" ;;
+    r) rate_naabu="$OPTARG" ;;
+    t) ffuf_threads="$OPTARG" ;;
+    e) ephemeral=1 ;;
+    h) usage; exit 0 ;;
+    \?) echo "Unknown flag: -$OPTARG"; usage; exit 1 ;;
+    :) echo "Missing value for -$OPTARG"; usage; exit 1 ;;
+  esac
+done
+
+if [[ -z "$domain" ]]; then
+  echo "[agentbh] -d <domain> is required"; usage; exit 1
+fi
+
+mkdir -p "$repo_root/config/programs" "$repo_root/data/scans" "$repo_root/data/logs" "$repo_root/data/reports" "$repo_root/data/raw"
+
+# program slug
+if [[ -z "$slug" ]]; then
+  slug="$(auto_slug)"
+  echo "[agentbh] auto-generated slug: $slug"
+fi
+
+# create per-run program YAML (ephemeral)
+prog_yaml="$repo_root/config/programs/${slug}.yaml"
+cat > "$prog_yaml" <<YAML
+program: "$slug"
+notes: "Ephemeral program created by wrapper."
+in_scope:
+  - type: domain
+    value: "${domain}"
+  - type: domain
+    value: "*.${domain}"
+out_of_scope: []
+rate_limits:
+  httpx_rps: 5
+  nuclei_rps: ${rate_nuclei}
+proof:
+  required: false
+report_format: "markdown"
+YAML
+echo "[agentbh] Created program YAML: config/programs/${slug}.yaml"
+
+# helpers
+summary() {
+  echo
+  echo "== Hosts count =="
+  if [[ -f "data/raw/${slug}_hosts.txt" ]]; then
+    wc -l "data/raw/${slug}_hosts.txt" || true
+  else
+    echo "no raw hosts file"
+  fi
+
+  echo; echo "== Alive URLs (first 10) =="
+  if [[ -f "data/scans/${slug}_httpx.jsonl" ]]; then
+    jq -r '.url' "data/scans/${slug}_httpx.jsonl" | sed -n '1,10p' || true
+  else
+    echo "no httpx results"
+  fi
+
+  echo; echo "== Nuclei summary =="
+  if [[ -f "data/scans/${slug}_nuclei.jsonl" ]]; then
+    jq -r '[.["template-id"], .info.name, .info.severity, (.["matched-at"] // .host // "N/A")] | @tsv' \
+      "data/scans/${slug}_nuclei.jsonl" | sed -n '1,20p' || true
+  else
+    echo "no nuclei results"
+  fi
+
+  echo; echo "== Draft report head =="
+  if [[ -f "data/reports/${slug}_draft.md" ]]; then
+    sed -n '1,30p' "data/reports/${slug}_draft.md" || true
+  else
+    echo "no draft report"
+  fi
+}
+
+# tasks
+if (( do_all == 1 )); then
+  echo "[agentbh] Running full pipeline for: $slug targeting $domain"
+  ( cd "$repo_root" && python -m agent.cli scan --program "$slug" )
+fi
+
+if (( do_ports == 1 )); then
+  echo "[agentbh] Running naabu (ports) rate=${rate_naabu}..."
+  "$HOME/go/bin/naabu" -list "data/raw/${slug}_hosts.txt" -tp 1000 -rate "${rate_naabu}" -silent -o "data/scans/${slug}_naabu.txt" || true
+  echo "[agentbh] naabu output: data/scans/${slug}_naabu.txt"
+fi
+
+if (( do_nuclei == 1 )); then
+  echo "[agentbh] Running nuclei profile..."
+  "$HOME/go/bin/nuclei" \
+    -l "data/raw/${slug}_hosts.txt" \
+    -jsonl -rl "${rate_nuclei}" \
+    -o "data/scans/${slug}_nuclei.jsonl" || true
+  echo "[agentbh] nuclei output: data/scans/${slug}_nuclei.jsonl"
+fi
+
+if (( do_crawl == 1 )); then
+  echo "[agentbh] Crawling with katana..."
+  printf "https://${domain}\nhttps://www.${domain}\n" > "/tmp/${slug}_seed.txt"
+  "$HOME/go/bin/katana" -list "/tmp/${slug}_seed.txt" -d 2 -jc -em \
+    -ef .png,.jpg,.jpeg,.gif,.svg,.css,.woff,.woff2,.ttf \
+    -o "data/scans/${slug}_katana_urls.txt" 2>&1 | tee "data/logs/${slug}_katana.log" || true
+  echo "[agentbh] katana output: data/scans/${slug}_katana_urls.txt"
+fi
+
+if (( do_ffuf == 1 )); then
+  if [[ -z "$ffuf_url" ]] || [[ "$ffuf_url" != *"FUZZ"* ]]; then
+    echo "[agentbh] FFUF requires -u with FUZZ in URL"; exit 1
+  fi
+  if [[ ! -s "$wordlist" ]]; then
+    printf 'INJECT_TEST\n' > "$wordlist"
+  fi
+  echo "[agentbh] Running ffuf: $ffuf_url"
+  "$HOME/go/bin/ffuf" -u "$ffuf_url" -w "$wordlist" -mc 200 -mr "INJECT_TEST" -t "$ffuf_threads" \
+    -o "data/scans/${slug}_ffuf.json" || true
+  echo "[agentbh] ffuf output: data/scans/${slug}_ffuf.json"
+fi
+
+if (( do_summary == 1 )); then
+  summary
+fi
+
+if (( ephemeral == 1 )); then
+  echo "[agentbh] -e set → removing config/programs/${slug}.yaml"
+  rm -f "$prog_yaml"
+fi
+
+echo "[agentbh] done."
