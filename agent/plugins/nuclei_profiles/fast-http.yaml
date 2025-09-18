@@ -1,0 +1,15 @@
+id: fast-http
+info:
+  name: Fast HTTP Profile
+  author: bb-ai
+  severity: info
+# a small, safe baseline
+include:
+  - cves/202*/**/*.yaml
+  - http/exposed-panels/**
+  - http/exposures/**
+  - http/misconfiguration/**
+  - http/default-logins/**
+  - http/token-spray/**
+  - http/takeovers/**
+# tune as needed per program

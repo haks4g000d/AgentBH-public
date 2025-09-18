@@ -1,0 +1,16 @@
+agent_name: "AgentBH"
+storage:
+  db_path: "data/bb_agent.sqlite"
+  logs_dir: "data/logs"
+llm:
+  provider: "none"     # options: "ollama" | "openai"
+  model: "deepseek-r1:8b"
+  temperature: 0.2
+safety:
+  hard_fail_on_out_of_scope: true
+  max_httpx_concurrency: 50
+  max_targets: 5000
+defaults:
+  wordlists:
+    subdomain: "/usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"
+  nuclei_profile: "plugins/nuclei_profiles/fast-http.yaml"

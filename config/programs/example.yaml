@@ -1,0 +1,14 @@
+program: "Example Program"
+notes: "Sample only. Replace with your target before scanning."
+in_scope:
+  - type: domain
+    value: "example.com"
+  - type: domain
+    value: "*.example.com"
+out_of_scope: []
+rate_limits:
+  httpx_rps: 5
+  nuclei_rps: 5
+proof:
+  required: false
+report_format: "markdown"
